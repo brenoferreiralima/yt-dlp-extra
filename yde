@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# Check if a URL is passed as an argument
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 <url>"
+    exit 1
+fi
+
+# Video URL
+URL=$1
+
+# Download app
+APP="yt-dlp"
+
+# App options
+OPT="-o %(title)s.%(ext)s
+     --restrict-filenames
+     --windows-filenames
+     --merge-output-format mp4
+     --remux-video mp4
+     --embed-thumbnail"
+
+# Show format options for download
+$APP -F "$URL"
+
+# Get format option
+echo -e "\nChoose format by ID"
+read -p "iD: " ID
+echo ""
+
+# Dowload
+if [ "$ID" = "" ];
+then $APP "$URL" $OPT
+else RESPONSE=`$APP -f "$ID" "$URL" $OPT 2>&1 | tee /dev/tty`
+fi
+
+# Final message
+if grep -q "ERROR:" <<< "$RESPONSE";
+then echo -e "\nDownload Failed! Check error message above."
+else echo -e "\nDownload Completed Successfully!"
+fi
