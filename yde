@@ -24,7 +24,9 @@ OPT="-o %(title)s.%(ext)s
      --windows-filenames
      --merge-output-format mp4
      --remux-video mp4
-     --embed-thumbnail"
+     --embed-thumbnail
+     --concurrent-fragments 8
+     --no-part"
 
 echo -e ""
 
