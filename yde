@@ -1,51 +1,61 @@
 #!/bin/bash
 
-# Check if a URL is passed as an argument
-if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 <url>"
-    exit 1
-fi
-
-# ANSI Color variables (BOLD)
+# ANSI color variables (BOLD)
 NColor='\033[0m'      # No Color
 BRed='\033[1;31m'     # Red
 BGreen='\033[1;32m'   # Green
 BYellow='\033[1;33m'  # Yellow
 
-# Video URL
-URL=$1
+# check if only one URL is passed and set URL variable
+if [ $# -eq 0 ]; then
+    echo -e "${BYellow}Please enter a URL.${NColor}"
+    read -p "URL: " URL
+    if [ -z "$URL" ]; then
+        echo -e "${BRed}No URL provided. Exiting.${NColor}"
+        exit 1
+    fi
+elif [ $# -ne 1 ]; then
+    echo -e "${BRed}Expected 1 argument, but $# provided. Exiting.${NColor}"
+    exit 1
+else
+    URL=$1
+fi
 
-# Download app
+# set download app
 APP="yt-dlp"
 
-# App options
+# set download app options
 OPT="-o %(title)s.%(ext)s
      --restrict-filenames
      --windows-filenames
-     --merge-output-format mp4
-     --remux-video mp4
      --embed-thumbnail
      --concurrent-fragments 8
      --no-part"
 
 echo -e ""
 
-# Show format options for download
-$APP -F "$URL"
+# show format options for download
+RESPONSE=`unbuffer $APP -F "$URL" 2>&1 | tee /dev/tty`
 
-# Get format option
-echo -e "\n${BYellow}Choose format by ID.${NColor}"
-read -p "ID: " ID
-echo ""
-
-# Dowload
-if [ "$ID" = "" ];
-then $APP "$URL" $OPT
-else RESPONSE=`$APP -f "$ID" "$URL" $OPT 2>&1 | tee /dev/tty`
+# show message for URL problems
+if [ grep -q "ERROR:" <<< "$RESPONSE" ]; then 
+echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}"
+exit 1
 fi
 
-# Final message
-if grep -q "ERROR:" <<< "$RESPONSE";
-then echo -e "\n${BRed}Download Failed! Check error message above.${NColor}"
+# get format option
+echo -e "\n${BYellow}Choose format by ID.${NColor}"
+read -p "ID: " ID
+echo -e ""
+
+# dowload
+if [ "$ID" = "" ];
+then $APP "$URL" $OPT
+else RESPONSE=`unbuffer $APP -f "$ID" "$URL" $OPT 2>&1 | tee /dev/tty`
+fi
+
+# final message
+if [ grep -q "ERROR:" <<< "$RESPONSE" ];
+then echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}"
 else echo -e "\n${BGreen}Download Completed Successfully!${NColor}"
 fi
