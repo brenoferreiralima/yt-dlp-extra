@@ -38,7 +38,7 @@ echo -e ""
 RESPONSE=`unbuffer $APP -F "$URL" 2>&1 | tee /dev/tty`
 
 # show message for URL problems
-if [ grep -q "ERROR:" <<< "$RESPONSE" ]; then 
+if grep -q "ERROR:" <<< "$RESPONSE" ; then 
 echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}"
 exit 1
 fi
@@ -55,7 +55,7 @@ else RESPONSE=`unbuffer $APP -f "$ID" "$URL" $OPT 2>&1 | tee /dev/tty`
 fi
 
 # final message
-if [ grep -q "ERROR:" <<< "$RESPONSE" ];
+if grep -q "ERROR:" <<< "$RESPONSE";
 then echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}"
 else echo -e "\n${BGreen}Download Completed Successfully!${NColor}"
 fi
