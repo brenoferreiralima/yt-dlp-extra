@@ -1,7 +1,6 @@
 
 # YDE (yt-dlp-extra)
-a basic shell script to make yt-dlp simpler to use
-> with a few personal options
+a basic shell script to make yt-dlp simpler to use (with a few personal options)
 
 ## Dependencies
 - coreutils (tee)
