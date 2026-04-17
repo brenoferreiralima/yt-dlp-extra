@@ -6,25 +6,25 @@ BRed='\033[1;31m'     # Red
 BGreen='\033[1;32m'   # Green
 BYellow='\033[1;33m'  # Yellow
 
-# check if only one URL is passed and set URL variable
+# Check if only one URL is passed and set URL variable
 if [ $# -eq 0 ]; then
-    echo -e "${BYellow}Please enter a URL.${NColor}"
+    echo -e "\n${BYellow}Please enter a URL.${NColor}"
     read -p "URL: " URL
     if [ -z "$URL" ]; then
         echo -e "${BRed}No URL provided. Exiting.${NColor}"
         exit 1
     fi
 elif [ $# -ne 1 ]; then
-    echo -e "${BRed}Expected 1 argument, but $# provided. Exiting.${NColor}"
+    echo -e "\n${BRed}Expected 1 argument, but $# provided. Exiting.${NColor}\n"
     exit 1
 else
     URL=$1
 fi
 
-# set download app
+# Set download app
 APP="yt-dlp"
 
-# set download app options
+# Set download app options
 OPT="-o %(title)s.%(ext)s
      --restrict-filenames
      --windows-filenames
@@ -32,30 +32,34 @@ OPT="-o %(title)s.%(ext)s
      --concurrent-fragments 8
      --no-part"
 
-echo -e ""
-
-# show format options for download
-RESPONSE=`unbuffer $APP -F "$URL" 2>&1 | tee /dev/tty`
-
-# show message for URL problems
-if grep -q "ERROR:" <<< "$RESPONSE" ; then 
-echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}"
-exit 1
+# Show format options for download
+if type -p unbuffer > /dev/null 2>&1; then 
+    echo ""
+    RESPONSE=`unbuffer $APP -F "$URL" 2>&1 | tee /dev/tty`
+else
+    echo -e "\n${BRed}Please install \"expect\" for color outputs.${NColor}\n"
+    RESPONSE=`$APP -F "$URL" 2>&1 | tee /dev/tty`
 fi
 
-# get format option
+# Show message for URL problems
+if grep -q "ERROR:" <<< "$RESPONSE" ; then 
+    echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}"
+    exit 1
+fi
+
+# Get format option
 echo -e "\n${BYellow}Choose format by ID.${NColor}"
 read -p "ID: " ID
 echo -e ""
 
-# dowload
+# Download
 if [ "$ID" = "" ];
 then $APP "$URL" $OPT
-else RESPONSE=`unbuffer $APP -f "$ID" "$URL" $OPT 2>&1 | tee /dev/tty`
+else RESPONSE=`$APP -f "$ID" "$URL" $OPT 2>&1 | tee /dev/tty`
 fi
 
 # final message
 if grep -q "ERROR:" <<< "$RESPONSE";
-then echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}"
-else echo -e "\n${BGreen}Download Completed Successfully!${NColor}"
+then echo -e "\n${BRed}Download Failed! Please check the error message above. Exiting.${NColor}\n"
+else echo -e "\n${BGreen}Download completed successfully!${NColor}\n"
 fi
