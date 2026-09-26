@@ -5,6 +5,8 @@ a basic shell script to make yt-dlp simpler to use (with a few personal options)
 ## Dependencies
 - coreutils (tee)
 - expect (unbuffered)
+- yt-dlp-ejs (yt-dlp full compatibility)
+- deno (js runtime for yt-dlp-ejs)
 
 
 ## Install
