@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+#
+# yde-next - a safer, more robust rewrite of yde.
+#
+# Same workflow as yde: show yt-dlp formats, ask for a format ID, then
+# download. Differences from yde:
+#   - Rejects non-http(s) URLs and passes "--" before the URL so a crafted
+#     "URL" cannot become a yt-dlp option.
+#   - Ignores yt-dlp config files and plugins by default. Opt in with
+#     YDE_USE_CONFIG=1 / YDE_USE_PLUGINS=1 if you trust them.
+#   - Refuses to run as root by default.
+#   - Sets umask 077, does not overwrite files by default, and defaults to
+#     one video instead of a whole playlist.
+#   - Sanitizes terminal escape sequences from remote metadata, preserving
+#     colors only when writing to a terminal.
+#   - Uses yt-dlp's exit status instead of grepping its output.
+#
+# Environment:
+#   YDE_OUTDIR=DIR         Output directory (default: current directory)
+#   YDE_USE_CONFIG=1       Honor yt-dlp config files
+#   YDE_USE_PLUGINS=1      Load yt-dlp plugins
+#   YDE_ALLOW_EXEC=1       Allow --exec from yt-dlp config
+#   YDE_ALLOW_PLAYLIST=1   Download full playlists
+#   YDE_OVERWRITE=1        Overwrite existing files
+#   YDE_MAX_FILESIZE=SIZE  Pass --max-filesize (for example 2G)
+#   YDE_SIMULATE=1         Pass --simulate (do not download)
+#   YDE_ALLOW_ROOT=1       Permit running as root (not recommended)
+#   YDE_YTDLP=PATH         Use a specific yt-dlp binary
+#
+set -euo pipefail
+
+APP_NAME="${0##*/}"
+
+if [ -t 1 ]; then
+    NC=$'\033[0m'
+    RED=$'\033[1;31m'
+    GREEN=$'\033[1;32m'
+    YELLOW=$'\033[1;33m'
+else
+    NC=""
+    RED=""
+    GREEN=""
+    YELLOW=""
+fi
+
+usage() {
+    cat <<EOF
+Usage: $APP_NAME [--] [URL]
+
+Download a video with yt-dlp after choosing a format.
+
+Options:
+  -h, --help             Show this help
+
+Environment:
+  YDE_OUTDIR=DIR         Output directory (default: current directory)
+  YDE_USE_CONFIG=1       Honor yt-dlp config files (ignored by default)
+  YDE_USE_PLUGINS=1      Load yt-dlp plugins (disabled by default)
+  YDE_ALLOW_EXEC=1       Allow --exec from yt-dlp config
+  YDE_ALLOW_PLAYLIST=1   Download full playlists (single video by default)
+  YDE_OVERWRITE=1        Overwrite existing files
+  YDE_MAX_FILESIZE=SIZE  Pass --max-filesize (for example 2G)
+  YDE_SIMULATE=1         Pass --simulate (do not download)
+  YDE_ALLOW_ROOT=1       Permit running as root (not recommended)
+  YDE_YTDLP=PATH         Use a specific yt-dlp binary
+
+Examples:
+  $APP_NAME https://example.com/video
+  YDE_OUTDIR=\$HOME/Downloads $APP_NAME https://example.com/video
+
+Dependencies:
+  bash, yt-dlp, GNU sed
+  expect (optional, for colored output)
+  ffmpeg (optional, for thumbnail embedding)
+EOF
+}
+
+trim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+# Remove terminal control sequences that can be embedded in remote metadata
+# (titles, descriptions, error messages). SGR colors and erase-line sequences
+# are preserved on a terminal; everything is stripped when not on a terminal.
+sanitize_output() {
+    if [ -t 1 ]; then
+        LC_ALL=C sed -E \
+            -e 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g' \
+            -e 's/\x1b[P^_X][^\x1b]*(\x1b\\)?//g' \
+            -e 's/\x1b\[[\x20-\x3f]*[\x40-\x4a\x4c-\x6c\x6e-\x7e]//g' \
+            -e 's/\x1b[\x20-\x2f]*[\x30-\x5a\x5c\x5e-\x7e]//g' \
+            -e 's/\x1b\].*$//' \
+            -e 's/\x1b[P^_X].*$//' \
+            -e 's/\x1b\[[\x20-\x3f]*$//' \
+            -e 's/\x1b$//' \
+            -e 's/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]//g' \
+            -e 's/^.*Available formats for .*$/&\n/'
+    else
+        LC_ALL=C sed -E \
+            -e 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g' \
+            -e 's/\x1b[P^_X][^\x1b]*(\x1b\\)?//g' \
+            -e 's/\x1b\[[\x20-\x3f]*[\x40-\x7e]//g' \
+            -e 's/\x1b[\x20-\x2f]*[\x30-\x7e]//g' \
+            -e 's/\x1b\].*$//' \
+            -e 's/\x1b[P^_X].*$//' \
+            -e 's/\x1b\[[\x20-\x3f]*$//' \
+            -e 's/\x1b$//' \
+            -e 's/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]//g' \
+            -e 's/^.*Available formats for .*$/&\n/'
+    fi
+}
+
+run_ytdlp() {
+    local -a pipe_status
+    local status sanitize_status
+
+    if [ -t 1 ] && [ -n "$UNBUFFER" ]; then
+        "$UNBUFFER" "$APP" "$@" 2>&1 | sanitize_output
+    else
+        "$APP" "$@" 2>&1 | sanitize_output
+    fi
+
+    # Capture PIPESTATUS before any other command replaces it.
+    pipe_status=("${PIPESTATUS[@]}")
+    status="${pipe_status[0]}"
+    sanitize_status="${pipe_status[1]:-0}"
+
+    if [ "$sanitize_status" -ne 0 ]; then
+        printf '%sOutput sanitizer failed; aborting.%s\n' "$RED" "$NC" >&2
+        return 1
+    fi
+
+    return "$status"
+}
+
+if [ "$UID" -eq 0 ]; then
+    if [ "${YDE_ALLOW_ROOT:-0}" != "1" ]; then
+        printf '%sRefusing to run as root. Use your normal user account.%s\n' "$RED" "$NC" >&2
+        printf 'Set YDE_ALLOW_ROOT=1 only if you understand the risk.\n' >&2
+        exit 1
+    fi
+    printf '%sWarning: running as root (YDE_ALLOW_ROOT=1).%s\n' "$YELLOW" "$NC" >&2
+fi
+
+umask 077
+
+APP="${YDE_YTDLP:-yt-dlp}"
+if ! APP="$(command -v "$APP" 2>/dev/null)"; then
+    printf '%syt-dlp was not found in PATH.%s\n' "$RED" "$NC" >&2
+    printf 'Install yt-dlp or set YDE_YTDLP to the executable path.\n' >&2
+    exit 1
+fi
+
+if ! command -v sed >/dev/null 2>&1; then
+    printf '%sGNU sed is required for output sanitization.%s\n' "$RED" "$NC" >&2
+    exit 1
+fi
+SED_VERSION="$(sed --version 2>/dev/null || true)"
+if [[ "$SED_VERSION" != *"GNU sed"* ]]; then
+    printf '%sGNU sed is required for output sanitization.%s\n' "$RED" "$NC" >&2
+    exit 1
+fi
+
+UNBUFFER=""
+if command -v unbuffer >/dev/null 2>&1; then
+    UNBUFFER="$(command -v unbuffer)"
+elif [ -t 1 ]; then
+    printf '%sNote: install "expect" for colored yt-dlp output.%s\n' "$YELLOW" "$NC"
+fi
+
+HAVE_FFMPEG=0
+if command -v ffmpeg >/dev/null 2>&1; then
+    HAVE_FFMPEG=1
+fi
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+esac
+
+if [ "${1:-}" = "--" ]; then
+    shift
+fi
+
+if [ "$#" -eq 0 ]; then
+    printf '\n%sPlease enter a URL.%s\n' "$YELLOW" "$NC"
+    if ! IFS= read -r -p "URL: " URL; then
+        printf '\n%sNo URL provided. Exiting.%s\n' "$RED" "$NC" >&2
+        exit 1
+    fi
+elif [ "$#" -eq 1 ]; then
+    URL="$1"
+else
+    printf '%sExpected 1 URL, but %d arguments were provided.%s\n' "$RED" "$#" "$NC" >&2
+    usage >&2
+    exit 1
+fi
+
+URL="$(trim "$URL")"
+
+if [ -z "$URL" ]; then
+    printf '%sNo URL provided. Exiting.%s\n' "$RED" "$NC" >&2
+    exit 1
+fi
+
+if [[ "$URL" =~ [[:cntrl:]] ]] || [ "${#URL}" -gt 8192 ]; then
+    printf '%sThe URL contains invalid characters or is too long.%s\n' "$RED" "$NC" >&2
+    exit 1
+fi
+
+if [[ ! "$URL" =~ ^[Hh][Tt][Tt][Pp][Ss]?:// ]]; then
+    printf '%sOnly http:// and https:// URLs are supported.%s\n' "$RED" "$NC" >&2
+    exit 1
+fi
+
+OUTDIR="${YDE_OUTDIR:-$PWD}"
+if ! mkdir -p -- "$OUTDIR"; then
+    printf '%sCould not create output directory: %s%s\n' "$RED" "$OUTDIR" "$NC" >&2
+    exit 1
+fi
+if ! OUTDIR="$(cd -- "$OUTDIR" && pwd -P)"; then
+    printf '%sCould not access output directory: %s%s\n' "$RED" "$OUTDIR" "$NC" >&2
+    exit 1
+fi
+
+OPT=()
+
+# yt-dlp config and plugins can define commands to execute. Ignore them by
+# default so the behavior of this script is controlled by this script.
+if [ "${YDE_USE_CONFIG:-0}" != "1" ]; then
+    OPT+=(--ignore-config)
+fi
+if [ "${YDE_ALLOW_EXEC:-0}" != "1" ]; then
+    OPT+=(--no-exec)
+fi
+if [ "${YDE_USE_PLUGINS:-0}" != "1" ]; then
+    OPT+=(--no-plugin-dirs)
+fi
+
+OPT+=(
+    --socket-timeout 30
+    -P "$OUTDIR"
+    -o '%(title)s.%(ext)s'
+    --restrict-filenames
+    --windows-filenames
+    --concurrent-fragments 8
+)
+
+if [ "$HAVE_FFMPEG" -eq 1 ]; then
+    OPT+=(--embed-thumbnail)
+elif [ "${YDE_SIMULATE:-0}" != "1" ]; then
+    printf '%sWarning: ffmpeg not found; skipping thumbnail embedding.%s\n' "$YELLOW" "$NC" >&2
+fi
+
+if [ "${YDE_ALLOW_PLAYLIST:-0}" != "1" ]; then
+    OPT+=(--no-playlist)
+fi
+
+if [ "${YDE_OVERWRITE:-0}" != "1" ]; then
+    OPT+=(--no-overwrites)
+fi
+
+if [ -n "${YDE_MAX_FILESIZE:-}" ]; then
+    OPT+=(--max-filesize "$YDE_MAX_FILESIZE")
+fi
+
+SIMULATE=0
+if [ "${YDE_SIMULATE:-0}" = "1" ]; then
+    SIMULATE=1
+    OPT+=(--simulate)
+fi
+
+if [ ! -t 1 ]; then
+    OPT+=(--no-progress)
+fi
+
+printf '\n%sFetching available formats...%s\n\n' "$YELLOW" "$NC"
+if run_ytdlp "${OPT[@]}" -F -- "$URL"; then
+    :
+else
+    status=$?
+    printf '\n%sCould not list formats. Please check the error above.%s\n' "$RED" "$NC" >&2
+    exit "$status"
+fi
+
+printf '\n%sChoose format by ID (press Enter for the default).%s\n' "$YELLOW" "$NC"
+if ! IFS= read -r -p "ID: " ID; then
+    ID=""
+fi
+printf '\n'
+
+ID="$(trim "$ID")"
+
+if [[ "$ID" =~ [[:cntrl:]] ]] || [ "${#ID}" -gt 256 ]; then
+    printf '%sThe format ID contains invalid characters or is too long.%s\n' "$RED" "$NC" >&2
+    exit 1
+fi
+
+CMD=("${OPT[@]}")
+if [ -n "$ID" ]; then
+    CMD+=(-f "$ID")
+fi
+CMD+=(-- "$URL")
+
+if [ "$SIMULATE" -eq 1 ]; then
+    printf '%sOutput directory: %s%s\n\n' "$YELLOW" "$OUTDIR" "$NC"
+else
+    printf '%sSaving to: %s%s\n\n' "$YELLOW" "$OUTDIR" "$NC"
+fi
+
+if run_ytdlp "${CMD[@]}"; then
+    if [ "$SIMULATE" -eq 1 ]; then
+        printf '\n%sSimulation completed successfully!%s\n\n' "$GREEN" "$NC"
+    else
+        printf '\n%sDownload completed successfully!%s\n\n' "$GREEN" "$NC"
+    fi
+else
+    status=$?
+    printf '\n%sDownload failed (exit %d). Please check the error above.%s\n\n' \
+        "$RED" "$status" "$NC" >&2
+    exit "$status"
+fi
